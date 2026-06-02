@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128" role="img" aria-label="S3Marks icon">
+  <rect width="128" height="128" rx="24" fill="#1f6feb"/>
+  <path d="M38 22h52a8 8 0 0 1 8 8v82L64 94l-34 18V30a8 8 0 0 1 8-8Z" fill="#fff"/>
+  <path d="M48 43h40M48 61h40M48 79h28" stroke="#1f6feb" stroke-width="8" stroke-linecap="round"/>
+</svg>
