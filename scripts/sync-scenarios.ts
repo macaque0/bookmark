@@ -1,7 +1,16 @@
 import assert from "node:assert/strict";
-import type { NormalizedBookmarkNode } from "../src/types/bookmark";
+import type { NormalizedBookmarkNode, SyncFile, SyncMetadata } from "../src/types/bookmark";
 import { prepareBrowserRootUpdates } from "../src/core/bookmarks/applyBookmarkTree";
 import { normalizeBookmarkTree } from "../src/core/bookmarks/normalizeBookmarks";
+import {
+  chooseLegacyLatestSyncFile,
+  getMetadataLatestKey,
+  getStaleLatestKey,
+  isEncryptedLatestKey,
+  LATEST_ENCRYPTED_KEY,
+  LATEST_JSON_KEY,
+  shouldUsePlaintextBeforeEncrypted
+} from "../src/core/sync/latestObject";
 import { mergeBookmarkTrees } from "../src/core/sync/merge";
 import { normalizeSyncTree } from "../src/core/sync/tree";
 
@@ -49,6 +58,16 @@ function titles(tree: NormalizedBookmarkNode[]): string[] {
   }
 
   return result;
+}
+
+function syncFile(revision: number): SyncFile {
+  return {
+    schemaVersion: 1,
+    revision,
+    deviceId: `device-${revision}`,
+    updatedAt: `2026-06-02T00:00:0${revision}.000Z`,
+    tree: []
+  };
 }
 
 async function testManagedRootDoesNotDisappear() {
@@ -178,10 +197,73 @@ function testNativeRootUpdatePlanDoesNotCreateManagedRoot() {
   assert.ok(updates.get("Other Bookmarks")?.some((node) => node.title === "Sync Conflicts"));
 }
 
+function testEncryptionMetadataSelectsActiveLatestObject() {
+  const plaintextMetadata: SyncMetadata = {
+    schemaVersion: 1,
+    latestRevision: 3,
+    latestUpdatedAt: "2026-06-02T00:00:03.000Z",
+    latestDeviceId: "device-3",
+    latestObjectKey: LATEST_JSON_KEY,
+    latestEncrypted: false
+  };
+  const encryptedMetadata: SyncMetadata = {
+    ...plaintextMetadata,
+    latestRevision: 4,
+    latestObjectKey: LATEST_ENCRYPTED_KEY,
+    latestEncrypted: true
+  };
+
+  assert.equal(getMetadataLatestKey(plaintextMetadata), LATEST_JSON_KEY);
+  assert.equal(isEncryptedLatestKey(LATEST_JSON_KEY, plaintextMetadata), false);
+  assert.equal(getMetadataLatestKey(encryptedMetadata), LATEST_ENCRYPTED_KEY);
+  assert.equal(isEncryptedLatestKey(LATEST_ENCRYPTED_KEY, encryptedMetadata), true);
+  assert.equal(getStaleLatestKey(LATEST_JSON_KEY), LATEST_ENCRYPTED_KEY);
+  assert.equal(getStaleLatestKey(LATEST_ENCRYPTED_KEY), LATEST_JSON_KEY);
+}
+
+function testLegacyMetadataDoesNotPreferStaleEncryptedLatest() {
+  const metadata: SyncMetadata = {
+    schemaVersion: 1,
+    latestRevision: 5,
+    latestUpdatedAt: "2026-06-02T00:00:05.000Z",
+    latestDeviceId: "device-5"
+  };
+
+  assert.equal(shouldUsePlaintextBeforeEncrypted(metadata, syncFile(5)), true);
+}
+
+function testLegacyLatestSelectionUsesMetadataRevision() {
+  const metadata: SyncMetadata = {
+    schemaVersion: 1,
+    latestRevision: 7,
+    latestUpdatedAt: "2026-06-02T00:00:07.000Z",
+    latestDeviceId: "device-7"
+  };
+  const selected = chooseLegacyLatestSyncFile(metadata, [
+    { key: LATEST_JSON_KEY, syncFile: syncFile(6) },
+    { key: LATEST_ENCRYPTED_KEY, syncFile: syncFile(7) }
+  ]);
+
+  assert.equal(selected?.revision, 7);
+}
+
+function testLegacyLatestSelectionFallsBackToHighestRevision() {
+  const selected = chooseLegacyLatestSyncFile(null, [
+    { key: LATEST_JSON_KEY, syncFile: syncFile(8) },
+    { key: LATEST_ENCRYPTED_KEY, syncFile: syncFile(6) }
+  ]);
+
+  assert.equal(selected?.revision, 8);
+}
+
 await testManagedRootDoesNotDisappear();
 await testStaleChineseBaseDoesNotDeleteRemote();
 testRootTitleCanonicalization();
 testManagedRootContentIsMigrated();
 testNativeRootUpdatePlanDoesNotCreateManagedRoot();
+testEncryptionMetadataSelectsActiveLatestObject();
+testLegacyMetadataDoesNotPreferStaleEncryptedLatest();
+testLegacyLatestSelectionUsesMetadataRevision();
+testLegacyLatestSelectionFallsBackToHighestRevision();
 
 console.log("sync scenarios passed");

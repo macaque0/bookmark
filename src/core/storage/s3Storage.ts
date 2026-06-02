@@ -1,4 +1,5 @@
 import {
+  DeleteObjectCommand,
   GetObjectCommand,
   HeadBucketCommand,
   HeadObjectCommand,
@@ -41,6 +42,26 @@ export async function putObjectText(key: string, body: string): Promise<void> {
       ContentType: "application/json; charset=utf-8"
     })
   );
+}
+
+export async function deleteObjectIfExists(key: string): Promise<void> {
+  const config = await requireConfig();
+  const client = createS3Client(config);
+
+  try {
+    await client.send(
+      new DeleteObjectCommand({
+        Bucket: config.bucket,
+        Key: resolveKey(config.prefix, key)
+      })
+    );
+  } catch (error) {
+    if (isNotFoundError(error)) {
+      return;
+    }
+
+    throw error;
+  }
 }
 
 export async function objectExists(key: string): Promise<boolean> {

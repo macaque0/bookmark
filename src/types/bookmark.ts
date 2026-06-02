@@ -27,6 +27,8 @@ export interface SyncMetadata {
   latestRevision: number;
   latestUpdatedAt: string;
   latestDeviceId: string;
+  latestObjectKey?: string;
+  latestEncrypted?: boolean;
 }
 
 export interface S3Config {

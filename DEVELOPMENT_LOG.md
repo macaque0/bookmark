@@ -14,7 +14,7 @@
 | 6 | 导入到浏览器 | 已完成 | 下载或合并后的书签树现在会写入浏览器原生根目录，例如 `Bookmarks Bar` / `Other Bookmarks`；旧 `S3Marks` 目录会在同步时迁移并清理。 |
 | 7 | 手动同步 | 已完成 | popup 现在只保留“立即同步”主按钮，并在 UI 中展示状态和错误；上传/下载能力保留在后台流程中用于初始化和恢复。 |
 | 8 | 基础三方合并 | 已完成 | Base/Local/Remote 合并会保留非冲突新增内容，并把冲突写入 `Sync Conflicts` 文件夹。 |
-| 9 | 加密 | 已完成 | 上传前使用 PBKDF2/SHA-256 和 AES-GCM 加密，下载时按需解密。 |
+| 9 | 加密 | 已完成 | 上传前使用 PBKDF2/SHA-256 和 AES-GCM 加密，下载时按 metadata 指向的最新对象按需解密，支持后续切换加密或不加密。 |
 | 10 | 自动同步 | 已完成 | Options 保存后会按 15/30/60 分钟配置重排 `chrome.alarms` 定时器，后台闹钟会执行 `syncNow`。 |
 
 ## 记录
@@ -52,3 +52,8 @@
 - 2026-06-02：优化首次同步策略。远程已有数据且本地没有同步基线时，现在会先合并本地书签和远程书签，再写回浏览器和上传新 revision，避免直接导入远程时覆盖新浏览器本地已有收藏。
 - 2026-06-02：新增原生目录迁移测试。覆盖旧 `S3Marks` 内容可迁移到 `Bookmarks Bar`、写入计划不再创建 `S3Marks` 根目录，以及异常顶层目录会归入 `Other Bookmarks`。
 - 2026-06-02：完成原生目录写回验证。重新运行 `npm run test:sync` 和 `npm run build`；同步场景测试、TypeScript 与 Vite 构建均通过，`dist` 已更新为不再创建 `S3Marks` 托管目录的版本。
+- 2026-06-02：开始修复加密模式切换问题。确认旧逻辑会优先读取 `latest.json.enc`，导致从加密切回不加密后可能继续读旧加密文件或报缺少密码。
+- 2026-06-02：完成加密模式切换修复。`metadata.json` 现在记录 `latestObjectKey` 和 `latestEncrypted`，下载时优先按 metadata 指向读取；旧 metadata 没有这些字段时，会按 revision 做兼容选择，避免旧 `latest.json.enc` 抢读新明文。
+- 2026-06-02：完成旧 latest 清理逻辑。上传加密版本后会尝试删除旧 `latest.json`，上传明文版本后会尝试删除旧 `latest.json.enc`；删除失败不会阻断同步，因为 metadata 已能指向正确文件。
+- 2026-06-02：完成加密模式切换验证。重新运行 `npm run test:sync` 和 `npm run build`；同步场景测试、TypeScript 与 Vite 构建均通过。
+- 2026-06-02：补充加密切换专项测试。将 latest 对象选择逻辑拆为可测试纯函数，并覆盖 metadata 指向明文、metadata 指向加密、旧 metadata 按 revision 选择、无 metadata 按最高 revision 兜底等场景；重新运行 `npm run test:sync` 和 `npm run build`，全部通过。

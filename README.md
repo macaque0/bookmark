@@ -16,6 +16,7 @@ S3Marks is a WebExtension / Manifest V3 browser extension for syncing bookmarks 
 - Legacy managed `S3Marks` folders are migrated into native roots and removed during sync.
 - Basic base/local/remote merge with conflict copies under `Sync Conflicts/<timestamp>/Local` and `Remote`.
 - Optional AES-GCM encryption using PBKDF2/SHA-256 before writing sync files to S3.
+- Encryption can be switched on or off later; `metadata.json` points to the active latest object.
 - Configurable automatic sync interval: off, 15, 30, or 60 minutes.
 - Local sync status and log storage through `chrome.storage.local`.
 
@@ -50,6 +51,8 @@ latest.json.enc
 metadata.json
 history/000001.json.enc
 ```
+
+`metadata.json` records the current latest object name and encryption state, so switching between encrypted and unencrypted sync does not accidentally read a stale `latest.json` or `latest.json.enc`. After each upload, S3Marks also tries to delete the opposite old latest file.
 
 ## Safety Notes
 

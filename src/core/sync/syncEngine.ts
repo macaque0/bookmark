@@ -20,14 +20,20 @@ import {
   saveSyncStatus
 } from "../config/configStore";
 import { decryptJson, encryptJson } from "../crypto/encrypt";
-import { getObjectText, putObjectText } from "../storage/s3Storage";
+import { deleteObjectIfExists, getObjectText, putObjectText } from "../storage/s3Storage";
 import { formatRevisionFileName, nowIso } from "../../utils/time";
+import {
+  chooseLegacyLatestSyncFile,
+  getMetadataLatestKey,
+  getStaleLatestKey,
+  isEncryptedLatestKey,
+  LATEST_ENCRYPTED_KEY,
+  LATEST_JSON_KEY,
+  METADATA_KEY,
+  shouldUsePlaintextBeforeEncrypted
+} from "./latestObject";
 import { mergeBookmarkTrees } from "./merge";
 import { normalizeSyncTree } from "./tree";
-
-const LATEST_JSON_KEY = "latest.json";
-const LATEST_ENCRYPTED_KEY = "latest.json.enc";
-const METADATA_KEY = "metadata.json";
 
 export async function uploadOnly(): Promise<void> {
   await runSyncOperation("上传本地书签到 S3", async () => {
@@ -55,7 +61,7 @@ export async function downloadOnly(): Promise<void> {
     const remote = await downloadLatestSyncFile(config);
 
     if (!remote) {
-      throw new Error("S3 中尚未找到 latest.json。");
+      throw new Error("S3 中尚未找到最新同步文件。");
     }
 
     await applyBookmarkTree(remote.tree);
@@ -165,28 +171,65 @@ export async function readLocalNormalizedTree(): Promise<NormalizedBookmarkNode[
 }
 
 export async function downloadLatestSyncFile(config: AppConfig): Promise<SyncFile | null> {
+  const metadata = await downloadMetadata();
+  const metadataLatestKey = getMetadataLatestKey(metadata);
+
+  if (metadataLatestKey) {
+    const text = await getObjectText(metadataLatestKey);
+
+    if (text) {
+      return parseSyncFileText(
+        text,
+        isEncryptedLatestKey(metadataLatestKey, metadata),
+        config,
+        metadataLatestKey
+      );
+    }
+  }
+
+  return downloadLatestSyncFileLegacy(config, metadata);
+}
+
+async function downloadLatestSyncFileLegacy(
+  config: AppConfig,
+  metadata: SyncMetadata | null
+): Promise<SyncFile | null> {
+  const plaintext = await getObjectText(LATEST_JSON_KEY);
+  const plaintextSyncFile = plaintext
+    ? sanitizeSyncFile(JSON.parse(plaintext) as SyncFile)
+    : null;
+
+  if (shouldUsePlaintextBeforeEncrypted(metadata, plaintextSyncFile)) {
+    return plaintextSyncFile;
+  }
+
   const encryptedText = await getObjectText(LATEST_ENCRYPTED_KEY);
 
-  if (encryptedText) {
-    if (!isEncryptionEnabled(config)) {
-      throw new Error("远程 latest.json 已加密，请先在设置页填写加密密码。");
+  if (!encryptedText) {
+    return plaintextSyncFile;
+  }
+
+  if (!isEncryptionEnabled(config)) {
+    if (plaintextSyncFile && !metadata) {
+      return plaintextSyncFile;
     }
 
-    return sanitizeSyncFile(
-      await decryptJson<SyncFile>(
-        JSON.parse(encryptedText) as EncryptedPayload,
-        config.encryptionPassword ?? ""
-      )
-    );
+    throw new Error("远程最新同步文件可能已加密，请先在设置页填写加密密码。");
   }
 
-  const plaintext = await getObjectText(LATEST_JSON_KEY);
-
-  if (!plaintext) {
-    return null;
-  }
-
-  return sanitizeSyncFile(JSON.parse(plaintext) as SyncFile);
+  const encryptedSyncFile = await parseSyncFileText(
+    encryptedText,
+    true,
+    config,
+    LATEST_ENCRYPTED_KEY
+  );
+  return chooseLegacyLatestSyncFile(
+    metadata,
+    [
+      plaintextSyncFile ? { key: LATEST_JSON_KEY, syncFile: plaintextSyncFile } : null,
+      { key: LATEST_ENCRYPTED_KEY, syncFile: encryptedSyncFile }
+    ].filter((candidate): candidate is { key: string; syncFile: SyncFile } => Boolean(candidate))
+  );
 }
 
 async function uploadSyncFile(syncFile: SyncFile, config: AppConfig): Promise<void> {
@@ -195,16 +238,20 @@ async function uploadSyncFile(syncFile: SyncFile, config: AppConfig): Promise<vo
     ? JSON.stringify(await encryptJson(syncFile, config.encryptionPassword ?? ""), null, 2)
     : JSON.stringify(syncFile, null, 2);
   const latestKey = encrypted ? LATEST_ENCRYPTED_KEY : LATEST_JSON_KEY;
+  const staleLatestKey = getStaleLatestKey(latestKey);
   const metadata: SyncMetadata = {
     schemaVersion: 1,
     latestRevision: syncFile.revision,
     latestUpdatedAt: syncFile.updatedAt,
-    latestDeviceId: syncFile.deviceId
+    latestDeviceId: syncFile.deviceId,
+    latestObjectKey: latestKey,
+    latestEncrypted: encrypted
   };
 
   await putObjectText(latestKey, body);
   await putObjectText(formatRevisionFileName(syncFile.revision, encrypted), body);
   await putObjectText(METADATA_KEY, JSON.stringify(metadata, null, 2));
+  await deleteStaleLatestObject(staleLatestKey);
 }
 
 async function downloadMetadata(): Promise<SyncMetadata | null> {
@@ -230,6 +277,41 @@ function sanitizeSyncFile(syncFile: SyncFile): SyncFile {
     ...syncFile,
     tree: normalizeSyncTree(syncFile.tree, MANAGED_ROOT_TITLE)
   };
+}
+
+async function parseSyncFileText(
+  text: string,
+  encrypted: boolean,
+  config: AppConfig,
+  key: string
+): Promise<SyncFile> {
+  if (!encrypted) {
+    return sanitizeSyncFile(JSON.parse(text) as SyncFile);
+  }
+
+  if (!isEncryptionEnabled(config)) {
+    throw new Error(`远程 ${key} 已加密，请先在设置页填写加密密码。`);
+  }
+
+  try {
+    return sanitizeSyncFile(
+      await decryptJson<SyncFile>(
+        JSON.parse(text) as EncryptedPayload,
+        config.encryptionPassword ?? ""
+      )
+    );
+  } catch (error) {
+    throw new Error(`远程 ${key} 解密失败，请确认加密密码是否正确。`);
+  }
+}
+
+async function deleteStaleLatestObject(key: string): Promise<void> {
+  try {
+    await deleteObjectIfExists(key);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "未知错误";
+    await appendSyncLog("info", `当前同步已完成，但清理旧 ${key} 失败：${message}`);
+  }
 }
 
 async function requireAppConfig(): Promise<AppConfig> {
