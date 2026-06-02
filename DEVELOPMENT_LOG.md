@@ -57,3 +57,8 @@
 - 2026-06-02：完成旧 latest 清理逻辑。上传加密版本后会尝试删除旧 `latest.json`，上传明文版本后会尝试删除旧 `latest.json.enc`；删除失败不会阻断同步，因为 metadata 已能指向正确文件。
 - 2026-06-02：完成加密模式切换验证。重新运行 `npm run test:sync` 和 `npm run build`；同步场景测试、TypeScript 与 Vite 构建均通过。
 - 2026-06-02：补充加密切换专项测试。将 latest 对象选择逻辑拆为可测试纯函数，并覆盖 metadata 指向明文、metadata 指向加密、旧 metadata 按 revision 选择、无 metadata 按最高 revision 兜底等场景；重新运行 `npm run test:sync` 和 `npm run build`，全部通过。
+- 2026-06-02：完成 README 中文详细化。将 README 从英文简要说明改为中文使用文档，补充安装构建、浏览器加载、首次使用、S3/COS 配置、同步文件结构、加密切换、自动同步、安全说明和常见问题。
+- 2026-06-02：开始准备插件市场上架资料。根据 Chrome Web Store 和 Microsoft Edge Add-ons 发布流程，准备商店文案、隐私政策、权限说明、审核测试说明、发布检查清单和 zip 打包脚本。
+- 2026-06-02：完成上架资料整理。新增 `store/` 资料目录，收窄 host permission 为 `https://*/*`，并添加 `npm run package:extension` 用于生成插件市场上传包。
+- 2026-06-02：完成上架包验证。重新运行 `npm run test:sync`、`npm run build` 和 `npm run package:extension`；生成 `release/s3marks-v0.1.0.zip`，并确认 zip 顶层包含 `manifest.json`。
+- 2026-06-02：调整发布方案为 GitHub Release。移除未计划使用的插件市场资料，保留 zip 打包脚本和 `release/` 忽略规则，并在 README 中改为说明 GitHub Release 下载、解压和开发者模式加载流程。

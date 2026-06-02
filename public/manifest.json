@@ -2,9 +2,9 @@
   "manifest_version": 3,
   "name": "S3Marks",
   "version": "0.1.0",
-  "description": "Sync browser bookmarks with S3-compatible storage.",
+  "description": "使用你自己的 S3 兼容对象存储同步浏览器书签。",
   "permissions": ["bookmarks", "storage", "alarms"],
-  "host_permissions": ["<all_urls>"],
+  "host_permissions": ["https://*/*"],
   "action": {
     "default_popup": "src/popup/index.html",
     "default_title": "S3Marks"
