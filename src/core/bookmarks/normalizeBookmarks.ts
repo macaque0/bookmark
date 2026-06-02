@@ -1,10 +1,6 @@
 import type { NormalizedBookmarkNode } from "../../types/bookmark";
 import { stableId } from "../../utils/uuid";
 
-interface NormalizeOptions {
-  excludeRootTitles?: string[];
-}
-
 type RawBookmarkNode = Partial<chrome.bookmarks.BookmarkTreeNode> & {
   children?: RawBookmarkNode[];
 };
@@ -31,14 +27,10 @@ const ROOT_TITLE_MAP = new Map<string, string>([
   ["移动设备书签", "Mobile Bookmarks"]
 ]);
 
-export function normalizeBookmarkTree(
-  rawTree: unknown[],
-  options: NormalizeOptions = {}
-): NormalizedBookmarkNode[] {
-  const excludedFolderTitles = new Set(options.excludeRootTitles ?? []);
+export function normalizeBookmarkTree(rawTree: unknown[]): NormalizedBookmarkNode[] {
   const roots = rawTree as RawBookmarkNode[];
 
-  return roots.flatMap((node) => normalizeRootNode(node, excludedFolderTitles));
+  return roots.flatMap((node) => normalizeRootNode(node));
 }
 
 export function countBookmarks(tree: NormalizedBookmarkNode[]): number {
@@ -64,32 +56,24 @@ export function sortTreeByIndex(tree: NormalizedBookmarkNode[]): NormalizedBookm
     }));
 }
 
-function normalizeRootNode(
-  node: RawBookmarkNode,
-  excludedFolderTitles: Set<string>
-): NormalizedBookmarkNode[] {
+function normalizeRootNode(node: RawBookmarkNode): NormalizedBookmarkNode[] {
   if (isInvisibleBrowserRoot(node)) {
     return (node.children ?? []).flatMap((child, index) =>
-      normalizeChildNode(child, "", index, excludedFolderTitles, true)
+      normalizeChildNode(child, "", index, true)
     );
   }
 
-  return normalizeChildNode(node, "", node.index ?? 0, excludedFolderTitles, true);
+  return normalizeChildNode(node, "", node.index ?? 0, true);
 }
 
 function normalizeChildNode(
   node: RawBookmarkNode,
   parentPath: string,
   fallbackIndex: number,
-  excludedFolderTitles: Set<string>,
   isTopLevel: boolean
 ): NormalizedBookmarkNode[] {
   const type = node.url ? "bookmark" : "folder";
   const title = normalizeTitle(node, isTopLevel);
-
-  if (type === "folder" && excludedFolderTitles.has(title)) {
-    return [];
-  }
 
   const index = node.index ?? fallbackIndex;
   const path = buildPath(parentPath, title);
@@ -107,7 +91,7 @@ function normalizeChildNode(
     normalized.url = node.url ?? "";
   } else {
     normalized.children = (node.children ?? []).flatMap((child, childIndex) =>
-      normalizeChildNode(child, path, childIndex, excludedFolderTitles, false)
+      normalizeChildNode(child, path, childIndex, false)
     );
   }
 

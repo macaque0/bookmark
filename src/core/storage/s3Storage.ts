@@ -8,7 +8,29 @@ import {
 import { getConfig, isConfigComplete } from "../config/configStore";
 import { createS3Client } from "./s3Client";
 
+export interface ObjectTextResult {
+  text: string;
+  eTag: string | null;
+}
+
+export interface PutObjectTextOptions {
+  ifMatch?: string;
+  ifNoneMatch?: string;
+}
+
+export class ConditionalWriteError extends Error {
+  constructor(message = "对象条件写入失败。") {
+    super(message);
+    this.name = "ConditionalWriteError";
+  }
+}
+
 export async function getObjectText(key: string): Promise<string | null> {
+  const result = await getObjectTextWithETag(key);
+  return result?.text ?? null;
+}
+
+export async function getObjectTextWithETag(key: string): Promise<ObjectTextResult | null> {
   const config = await requireConfig();
   const client = createS3Client(config);
 
@@ -20,7 +42,10 @@ export async function getObjectText(key: string): Promise<string | null> {
       })
     );
 
-    return result.Body ? bodyToText(result.Body) : "";
+    return {
+      text: result.Body ? await bodyToText(result.Body) : "",
+      eTag: result.ETag ?? null
+    };
   } catch (error) {
     if (isNotFoundError(error)) {
       return null;
@@ -30,18 +55,32 @@ export async function getObjectText(key: string): Promise<string | null> {
   }
 }
 
-export async function putObjectText(key: string, body: string): Promise<void> {
+export async function putObjectText(
+  key: string,
+  body: string,
+  options: PutObjectTextOptions = {}
+): Promise<void> {
   const config = await requireConfig();
   const client = createS3Client(config);
 
-  await client.send(
-    new PutObjectCommand({
-      Bucket: config.bucket,
-      Key: resolveKey(config.prefix, key),
-      Body: body,
-      ContentType: "application/json; charset=utf-8"
-    })
-  );
+  try {
+    await client.send(
+      new PutObjectCommand({
+        Bucket: config.bucket,
+        Key: resolveKey(config.prefix, key),
+        Body: body,
+        ContentType: "application/json; charset=utf-8",
+        IfMatch: options.ifMatch,
+        IfNoneMatch: options.ifNoneMatch
+      })
+    );
+  } catch (error) {
+    if (isConditionalWriteConflict(error)) {
+      throw new ConditionalWriteError();
+    }
+
+    throw error;
+  }
 }
 
 export async function deleteObjectIfExists(key: string): Promise<void> {
@@ -183,5 +222,20 @@ function isNotFoundError(error: unknown): boolean {
     candidate.name === "NoSuchKey"
     || candidate.name === "NotFound"
     || candidate.$metadata?.httpStatusCode === 404
+  );
+}
+
+function isConditionalWriteConflict(error: unknown): boolean {
+  if (!error || typeof error !== "object") {
+    return false;
+  }
+
+  const candidate = error as { name?: string; $metadata?: { httpStatusCode?: number } };
+
+  return (
+    candidate.name === "PreconditionFailed"
+    || candidate.name === "ConditionalRequestConflict"
+    || candidate.$metadata?.httpStatusCode === 409
+    || candidate.$metadata?.httpStatusCode === 412
   );
 }

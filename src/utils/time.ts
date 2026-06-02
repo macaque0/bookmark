@@ -29,7 +29,12 @@ export function formatConflictFolderName(date = new Date()): string {
     + [pad(date.getHours()), pad(date.getMinutes()), pad(date.getSeconds())].join("-");
 }
 
-export function formatRevisionFileName(revision: number, encrypted: boolean): string {
+export function formatRevisionFileName(
+  revision: number,
+  encrypted: boolean,
+  deviceId?: string
+): string {
   const base = revision.toString().padStart(6, "0");
-  return `history/${base}.json${encrypted ? ".enc" : ""}`;
+  const deviceSuffix = deviceId ? `-${deviceId.replace(/[^a-zA-Z0-9_-]/g, "")}` : "";
+  return `history/${base}${deviceSuffix}.json${encrypted ? ".enc" : ""}`;
 }

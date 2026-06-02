@@ -35,7 +35,7 @@ export function App() {
           getConfig(),
           getSyncStatus()
         ]);
-        const normalizedTree = normalizeBookmarkTree(rawTree, { excludeRootTitles: ["S3Marks"] });
+        const normalizedTree = normalizeBookmarkTree(rawTree);
 
         logger.info("Normalized bookmark tree", normalizedTree);
 
@@ -75,7 +75,7 @@ export function App() {
       setState((current) => ({ ...current, busy: true, error: null }));
       const status = await sendBackgroundMessage<SyncStatus>("syncNow");
       const rawTree = await getBrowserBookmarkTree();
-      const normalizedTree = normalizeBookmarkTree(rawTree, { excludeRootTitles: ["S3Marks"] });
+      const normalizedTree = normalizeBookmarkTree(rawTree);
 
       setState((current) => ({
         ...current,

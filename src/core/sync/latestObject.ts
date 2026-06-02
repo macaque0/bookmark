@@ -12,7 +12,7 @@ export interface LatestSyncFileCandidate {
 export function getMetadataLatestKey(metadata: SyncMetadata | null): string | null {
   const key = metadata?.latestObjectKey?.trim();
 
-  if (key === LATEST_JSON_KEY || key === LATEST_ENCRYPTED_KEY) {
+  if (key && isSupportedSyncObjectKey(key)) {
     return key;
   }
 
@@ -49,4 +49,12 @@ export function chooseLegacyLatestSyncFile(
 
 export function getStaleLatestKey(currentLatestKey: string): string {
   return currentLatestKey === LATEST_ENCRYPTED_KEY ? LATEST_JSON_KEY : LATEST_ENCRYPTED_KEY;
+}
+
+function isSupportedSyncObjectKey(key: string): boolean {
+  return (
+    key === LATEST_JSON_KEY
+    || key === LATEST_ENCRYPTED_KEY
+    || /^history\/\d{6}(?:-[A-Za-z0-9_-]+)?\.json(?:\.enc)?$/.test(key)
+  );
 }

@@ -12,11 +12,10 @@ const BOOKMARK_CHANGE_ALARM = "s3marks.bookmarkChangeAutoSync";
 const STARTUP_SYNC_ALARM = "s3marks.startupAutoSync";
 const BOOKMARK_CHANGE_DEBOUNCE_MINUTES = 0.25;
 const STARTUP_SYNC_DELAY_MINUTES = 0.17;
-const POST_SYNC_EVENT_SUPPRESSION_MS = 10_000;
 
 let syncInFlight: Promise<void> | null = null;
 let queuedSyncReason: string | null = null;
-let suppressBookmarkEventsUntil = 0;
+let applyingSyncedBookmarks = false;
 
 type BackgroundMessage =
   | { type: "uploadOnly" }
@@ -51,27 +50,27 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 });
 
 chrome.bookmarks.onCreated.addListener(() => {
-  void scheduleBookmarkChangeSync();
+  void handleBookmarkChange();
 });
 
 chrome.bookmarks.onRemoved.addListener(() => {
-  void scheduleBookmarkChangeSync();
+  void handleBookmarkChange();
 });
 
 chrome.bookmarks.onChanged.addListener(() => {
-  void scheduleBookmarkChangeSync();
+  void handleBookmarkChange();
 });
 
 chrome.bookmarks.onMoved.addListener(() => {
-  void scheduleBookmarkChangeSync();
+  void handleBookmarkChange();
 });
 
 chrome.bookmarks.onChildrenReordered.addListener(() => {
-  void scheduleBookmarkChangeSync();
+  void handleBookmarkChange();
 });
 
 chrome.bookmarks.onImportEnded.addListener(() => {
-  void scheduleBookmarkChangeSync();
+  void handleBookmarkChange();
 });
 
 chrome.runtime.onMessage.addListener((message: BackgroundMessage, _sender, sendResponse) => {
@@ -95,7 +94,7 @@ async function handleMessage(message: BackgroundMessage): Promise<unknown> {
       await uploadOnly();
       return getSyncStatus();
     case "downloadOnly":
-      await downloadOnly();
+      await downloadOnly(createApplyHooks());
       return getSyncStatus();
     case "syncNow":
       await runSyncWithLock("手动同步");
@@ -148,11 +147,20 @@ async function scheduleStartupSync(): Promise<void> {
   }
 }
 
-async function scheduleBookmarkChangeSync(): Promise<void> {
-  if (Date.now() < suppressBookmarkEventsUntil || syncInFlight) {
+async function handleBookmarkChange(): Promise<void> {
+  if (applyingSyncedBookmarks) {
     return;
   }
 
+  if (syncInFlight) {
+    queuedSyncReason = "书签变化自动同步";
+    return;
+  }
+
+  await scheduleBookmarkChangeSync();
+}
+
+async function scheduleBookmarkChangeSync(): Promise<void> {
   const config = await getConfig();
 
   if (!isConfigComplete(config) || config.syncOnBookmarkChange === false) {
@@ -198,12 +206,21 @@ async function runSyncLoop(initialReason: string): Promise<void> {
 
   while (reason) {
     queuedSyncReason = null;
-    suppressBookmarkEventsUntil = Date.now() + POST_SYNC_EVENT_SUPPRESSION_MS;
     await clearAlarm(BOOKMARK_CHANGE_ALARM);
-    await syncNow();
-    suppressBookmarkEventsUntil = Date.now() + POST_SYNC_EVENT_SUPPRESSION_MS;
+    await syncNow(createApplyHooks());
     reason = queuedSyncReason;
   }
+}
+
+function createApplyHooks() {
+  return {
+    beforeApply() {
+      applyingSyncedBookmarks = true;
+    },
+    afterApply() {
+      applyingSyncedBookmarks = false;
+    }
+  };
 }
 
 async function clearAlarm(name: string): Promise<void> {

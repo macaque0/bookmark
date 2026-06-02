@@ -13,6 +13,7 @@ import {
 } from "../src/core/sync/latestObject";
 import { mergeBookmarkTrees } from "../src/core/sync/merge";
 import { normalizeSyncTree } from "../src/core/sync/tree";
+import { formatRevisionFileName } from "../src/utils/time";
 
 function bookmark(title: string, url: string, index: number): chrome.bookmarks.BookmarkTreeNode {
   return {
@@ -70,41 +71,66 @@ function syncFile(revision: number): SyncFile {
   };
 }
 
-async function testManagedRootDoesNotDisappear() {
-  const remote = normalizeSyncTree(
+function testS3MarksFolderIsPreserved() {
+  const tree = normalizeSyncTree(
     normalizeBookmarkTree(
       browserTree([
-        folder("收藏夹栏", [bookmark("Edge A", "https://edge.example", 0)], 0)
+        folder(
+          "其他收藏夹",
+          [
+            folder("S3Marks", [bookmark("Project", "https://project.example", 0)], 0)
+          ],
+          0
+        )
       ])
     )
   );
-  const chromeOutside = normalizeBookmarkTree(
-    browserTree([
-      folder("其他收藏夹", [bookmark("Chrome B", "https://chrome.example", 0)], 0),
-      folder(
-        "S3Marks",
-        [
-          folder("Bookmarks Bar", [bookmark("Edge A", "https://edge.example", 0)], 0)
-        ],
-        1
-      )
-    ]),
-    { excludeRootTitles: ["S3Marks"] }
+  const allTitles = titles(tree);
+
+  assert.ok(allTitles.includes("/Other Bookmarks/S3Marks"));
+  assert.ok(allTitles.includes("/Other Bookmarks/S3Marks/Project"));
+}
+
+async function testS3MarksFolderMergesLikeNormalUserFolder() {
+  const base = normalizeSyncTree(
+    normalizeBookmarkTree(
+      browserTree([
+        folder("其他收藏夹", [folder("S3Marks", [], 0)], 0)
+      ])
+    )
   );
-  const chromeManaged = normalizeBookmarkTree(
-    browserTree([
-      folder("Bookmarks Bar", [bookmark("Edge A", "https://edge.example", 0)], 0)
-    ])
+  const local = normalizeSyncTree(
+    normalizeBookmarkTree(
+      browserTree([
+        folder(
+          "其他收藏夹",
+          [
+            folder("S3Marks", [bookmark("Local", "https://local.example", 0)], 0)
+          ],
+          0
+        )
+      ])
+    )
   );
-  const localCombined = normalizeSyncTree(
-    (await mergeBookmarkTrees([], chromeOutside, chromeManaged)).tree
+  const remote = normalizeSyncTree(
+    normalizeBookmarkTree(
+      browserTree([
+        folder(
+          "其他收藏夹",
+          [
+            folder("S3Marks", [bookmark("Remote", "https://remote.example", 0)], 0)
+          ],
+          0
+        )
+      ])
+    )
   );
-  const merged = await mergeBookmarkTrees(remote, localCombined, remote);
+  const merged = await mergeBookmarkTrees(base, local, remote);
   const mergedTitles = titles(merged.tree);
 
   assert.equal(merged.conflicts.length, 0);
-  assert.ok(mergedTitles.includes("/Bookmarks Bar/Edge A"));
-  assert.ok(mergedTitles.includes("/Other Bookmarks/Chrome B"));
+  assert.ok(mergedTitles.includes("/Other Bookmarks/S3Marks/Local"));
+  assert.ok(mergedTitles.includes("/Other Bookmarks/S3Marks/Remote"));
 }
 
 async function testStaleChineseBaseDoesNotDeleteRemote() {
@@ -138,6 +164,40 @@ async function testStaleChineseBaseDoesNotDeleteRemote() {
   assert.ok(mergedTitles.includes("/Bookmarks Bar/B"));
 }
 
+async function testLocalAdditionsSurviveStaleRemote() {
+  const base = normalizeSyncTree(
+    normalizeBookmarkTree(
+      browserTree([
+        folder("收藏夹栏", [bookmark("A", "https://a.example", 0)], 0)
+      ])
+    )
+  );
+  const local = normalizeSyncTree(
+    normalizeBookmarkTree(
+      browserTree([
+        folder("收藏夹栏", [
+          bookmark("A", "https://a.example", 0),
+          bookmark("Chrome New 1", "https://chrome-new-1.example", 1),
+          bookmark("Chrome New 2", "https://chrome-new-2.example", 2)
+        ], 0)
+      ])
+    )
+  );
+  const remote = normalizeSyncTree(
+    normalizeBookmarkTree(
+      browserTree([
+        folder("Bookmarks Bar", [bookmark("A", "https://a.example", 0)], 0)
+      ])
+    )
+  );
+  const merged = await mergeBookmarkTrees(base, local, remote);
+  const mergedTitles = titles(merged.tree);
+
+  assert.equal(merged.conflicts.length, 0);
+  assert.ok(mergedTitles.includes("/Bookmarks Bar/Chrome New 1"));
+  assert.ok(mergedTitles.includes("/Bookmarks Bar/Chrome New 2"));
+}
+
 function testRootTitleCanonicalization() {
   const tree = normalizeSyncTree(
     normalizeBookmarkTree(
@@ -158,7 +218,7 @@ function testRootTitleCanonicalization() {
   assert.ok(allTitles.includes("/Other Bookmarks/D"));
 }
 
-function testManagedRootContentIsMigrated() {
+function testTopLevelS3MarksIsNotMigrated() {
   const tree = normalizeSyncTree(
     normalizeBookmarkTree(
       browserTree([
@@ -174,7 +234,8 @@ function testManagedRootContentIsMigrated() {
   );
   const allTitles = titles(tree);
 
-  assert.ok(allTitles.includes("/Bookmarks Bar/Remote A"));
+  assert.equal(allTitles.includes("/Bookmarks Bar/Remote A"), false);
+  assert.ok(allTitles.includes("/Other Bookmarks/S3Marks/Bookmarks Bar/Remote A"));
 }
 
 function testNativeRootUpdatePlanDoesNotCreateManagedRoot() {
@@ -186,7 +247,7 @@ function testNativeRootUpdatePlanDoesNotCreateManagedRoot() {
     normalizeBookmarkTree(
       browserTree([
         folder("Bookmarks Bar", [bookmark("A", "https://a.example", 0)], 0),
-        folder("Sync Conflicts", [bookmark("Conflict A", "https://conflict.example", 0)], 1)
+        folder("S3Marks", [bookmark("Project", "https://project.example", 0)], 1)
       ])
     )
   );
@@ -194,7 +255,7 @@ function testNativeRootUpdatePlanDoesNotCreateManagedRoot() {
 
   assert.equal(updates.has("S3Marks"), false);
   assert.ok(updates.get("Bookmarks Bar")?.some((node) => node.title === "A"));
-  assert.ok(updates.get("Other Bookmarks")?.some((node) => node.title === "Sync Conflicts"));
+  assert.ok(updates.get("Other Bookmarks")?.some((node) => node.title === "S3Marks"));
 }
 
 function testEncryptionMetadataSelectsActiveLatestObject() {
@@ -219,6 +280,27 @@ function testEncryptionMetadataSelectsActiveLatestObject() {
   assert.equal(isEncryptedLatestKey(LATEST_ENCRYPTED_KEY, encryptedMetadata), true);
   assert.equal(getStaleLatestKey(LATEST_JSON_KEY), LATEST_ENCRYPTED_KEY);
   assert.equal(getStaleLatestKey(LATEST_ENCRYPTED_KEY), LATEST_JSON_KEY);
+}
+
+function testMetadataCanPointToImmutableHistoryObject() {
+  const plaintextHistoryMetadata: SyncMetadata = {
+    schemaVersion: 1,
+    latestRevision: 9,
+    latestUpdatedAt: "2026-06-02T00:00:09.000Z",
+    latestDeviceId: "device-9",
+    latestObjectKey: "history/000009-device-9.json",
+    latestEncrypted: false
+  };
+  const encryptedHistoryMetadata: SyncMetadata = {
+    ...plaintextHistoryMetadata,
+    latestObjectKey: "history/000010-device-10.json.enc",
+    latestEncrypted: true
+  };
+
+  assert.equal(getMetadataLatestKey(plaintextHistoryMetadata), "history/000009-device-9.json");
+  assert.equal(getMetadataLatestKey(encryptedHistoryMetadata), "history/000010-device-10.json.enc");
+  assert.equal(formatRevisionFileName(11, false, "device:with unsafe/chars"), "history/000011-devicewithunsafechars.json");
+  assert.equal(formatRevisionFileName(12, true, "device-12"), "history/000012-device-12.json.enc");
 }
 
 function testLegacyMetadataDoesNotPreferStaleEncryptedLatest() {
@@ -256,12 +338,15 @@ function testLegacyLatestSelectionFallsBackToHighestRevision() {
   assert.equal(selected?.revision, 8);
 }
 
-await testManagedRootDoesNotDisappear();
+testS3MarksFolderIsPreserved();
+await testS3MarksFolderMergesLikeNormalUserFolder();
 await testStaleChineseBaseDoesNotDeleteRemote();
+await testLocalAdditionsSurviveStaleRemote();
 testRootTitleCanonicalization();
-testManagedRootContentIsMigrated();
+testTopLevelS3MarksIsNotMigrated();
 testNativeRootUpdatePlanDoesNotCreateManagedRoot();
 testEncryptionMetadataSelectsActiveLatestObject();
+testMetadataCanPointToImmutableHistoryObject();
 testLegacyMetadataDoesNotPreferStaleEncryptedLatest();
 testLegacyLatestSelectionUsesMetadataRevision();
 testLegacyLatestSelectionFallsBackToHighestRevision();

@@ -11,35 +11,13 @@ const KNOWN_BROWSER_ROOT_TITLES = new Set([
 ]);
 
 export function normalizeSyncTree(
-  tree: NormalizedBookmarkNode[],
-  managedRootTitle = "S3Marks"
+  tree: NormalizedBookmarkNode[]
 ): NormalizedBookmarkNode[] {
-  const withoutManagedRoot = removeManagedRootFolders(tree, managedRootTitle);
-  const canonicalized = withoutManagedRoot.map((node) => canonicalizeNode(node, true));
+  const canonicalized = tree.map((node) => canonicalizeNode(node, true));
   const coalesced = coalesceDuplicateSiblings(canonicalized);
   const rootShaped = moveUnsupportedTopLevelNodes(coalesced);
 
   return rebaseTree(rootShaped, "");
-}
-
-function removeManagedRootFolders(
-  tree: NormalizedBookmarkNode[],
-  managedRootTitle: string
-): NormalizedBookmarkNode[] {
-  return tree.flatMap((node) => {
-    if (node.type === "folder" && node.title === managedRootTitle) {
-      return removeManagedRootFolders(node.children ?? [], managedRootTitle);
-    }
-
-    return [
-      {
-        ...node,
-        children: node.children
-          ? removeManagedRootFolders(node.children, managedRootTitle)
-          : undefined
-      }
-    ];
-  });
 }
 
 function canonicalizeNode(
