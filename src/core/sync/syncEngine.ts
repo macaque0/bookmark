@@ -173,7 +173,7 @@ export async function syncNow(hooks: SyncApplyHooks = {}): Promise<void> {
       base,
       remote.tree,
       pendingDeletions,
-      { includeFolders: false }
+      { includeFolders: true }
     );
     const shouldUpload = shouldUploadMergedTree(remote.tree, mergeResult.tree);
     const nextState = shouldUpload

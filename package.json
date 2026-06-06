@@ -1,6 +1,6 @@
 {
   "name": "s3marks",
-  "version": "0.1.3",
+  "version": "0.1.5",
   "private": true,
   "type": "module",
   "description": "Cross-browser bookmark sync extension backed by S3-compatible storage.",

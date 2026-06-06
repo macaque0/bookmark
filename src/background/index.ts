@@ -14,6 +14,7 @@ import {
   getDeferredBookmarkChangeDelayMinutes,
   type BookmarkEventDecision
 } from "./eventGate";
+import { createFolderDeletionFingerprint } from "../core/sync/deletions";
 
 const AUTO_SYNC_ALARM = "s3marks.autoSync";
 const BOOKMARK_CHANGE_ALARM = "s3marks.bookmarkChangeAutoSync";
@@ -352,7 +353,8 @@ function createDeletionEntries(
       }
     : {
         type: "folder",
-        title: node.title
+        title: node.title,
+        folderFingerprint: createFolderDeletionFingerprint(node)
       };
 
   return [

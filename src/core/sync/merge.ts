@@ -57,7 +57,10 @@ function mergeChildren(
     }
 
     if (localNode && !remoteNode) {
-      if (!hasMeaningfulChange(baseNode, localNode)) {
+      if (
+        !hasMeaningfulChange(baseNode, localNode)
+        || isDeletionOnlyChange(baseNode, localNode)
+      ) {
         continue;
       }
 
@@ -72,7 +75,10 @@ function mergeChildren(
     }
 
     if (!localNode && remoteNode) {
-      if (!hasMeaningfulChange(baseNode, remoteNode)) {
+      if (
+        !hasMeaningfulChange(baseNode, remoteNode)
+        || isDeletionOnlyChange(baseNode, remoteNode)
+      ) {
         continue;
       }
 
@@ -86,7 +92,10 @@ function mergeChildren(
     }
   }
 
-  return merged;
+  return merged.map((node, index) => ({
+    ...node,
+    index
+  }));
 }
 
 function mergeAddedNodes(
@@ -107,6 +116,30 @@ function mergeAddedNodes(
 
   const node = localNode ?? remoteNode;
   return node ? cloneNode(node) : null;
+}
+
+function isDeletionOnlyChange(
+  baseNode: NormalizedBookmarkNode,
+  changedNode: NormalizedBookmarkNode
+): boolean {
+  if (
+    baseNode.type !== changedNode.type
+    || baseNode.title !== changedNode.title
+    || baseNode.url !== changedNode.url
+  ) {
+    return false;
+  }
+
+  if (baseNode.type === "bookmark" || changedNode.type === "bookmark") {
+    return true;
+  }
+
+  const baseChildren = indexBySiblingKey(baseNode.children ?? []);
+
+  return (changedNode.children ?? []).every((changedChild) => {
+    const baseChild = baseChildren.get(getSiblingKey(changedChild));
+    return Boolean(baseChild && isDeletionOnlyChange(baseChild, changedChild));
+  });
 }
 
 function mergeExistingNodes(
@@ -236,12 +269,23 @@ function orderedUnionKeys(
   local: NormalizedBookmarkNode[],
   remote: NormalizedBookmarkNode[]
 ): string[] {
+  const baseKeys = siblingKeys(base);
+  const localKeys = siblingKeys(local);
+  const remoteKeys = siblingKeys(remote);
+  const localOrderChanged = hasSiblingSequenceChange(baseKeys, localKeys);
+  const remoteOrderChanged = hasSiblingSequenceChange(baseKeys, remoteKeys);
+  const preferredKeys = remoteOrderChanged
+    ? remoteKeys
+    : localOrderChanged
+      ? localKeys
+      : [];
   const seen = new Set<string>();
   const keys: string[] = [];
 
-  for (const node of [...base, ...local, ...remote].sort((left, right) => left.index - right.index)) {
-    const key = getSiblingKey(node);
-
+  for (const key of [
+    ...preferredKeys,
+    ...defaultUnionKeys(base, local, remote)
+  ]) {
     if (!seen.has(key)) {
       seen.add(key);
       keys.push(key);
@@ -249,6 +293,29 @@ function orderedUnionKeys(
   }
 
   return keys;
+}
+
+function defaultUnionKeys(
+  base: NormalizedBookmarkNode[],
+  local: NormalizedBookmarkNode[],
+  remote: NormalizedBookmarkNode[]
+): string[] {
+  return [...base, ...local, ...remote]
+    .sort((left, right) => left.index - right.index)
+    .map((node) => getSiblingKey(node));
+}
+
+function siblingKeys(tree: NormalizedBookmarkNode[]): string[] {
+  return [...tree]
+    .sort((left, right) => left.index - right.index)
+    .map((node) => getSiblingKey(node));
+}
+
+function hasSiblingSequenceChange(baseKeys: string[], targetKeys: string[]): boolean {
+  return (
+    baseKeys.length !== targetKeys.length
+    || baseKeys.some((key, index) => key !== targetKeys[index])
+  );
 }
 
 function getSiblingKey(node: NormalizedBookmarkNode): string {

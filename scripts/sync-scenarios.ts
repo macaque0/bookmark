@@ -5,13 +5,19 @@ import type {
   SyncFile,
   SyncMetadata
 } from "../src/types/bookmark";
-import { prepareBrowserRootUpdates } from "../src/core/bookmarks/applyBookmarkTree";
+import {
+  prepareBrowserRootUpdates,
+  prepareWritableBookmarkNodes
+} from "../src/core/bookmarks/applyBookmarkTree";
 import { normalizeBookmarkTree } from "../src/core/bookmarks/normalizeBookmarks";
 import {
   getBookmarkEventDecision,
   getDeferredBookmarkChangeDelayMinutes
 } from "../src/background/eventGate";
-import { applyPendingBookmarkDeletions } from "../src/core/sync/deletions";
+import {
+  applyPendingBookmarkDeletions,
+  createFolderDeletionFingerprint
+} from "../src/core/sync/deletions";
 import {
   chooseLegacyLatestSyncFile,
   getMetadataWriteOptions,
@@ -71,6 +77,33 @@ function titles(tree: NormalizedBookmarkNode[]): string[] {
   }
 
   return result;
+}
+
+function childTitlesAtPath(
+  tree: NormalizedBookmarkNode[],
+  path: string
+): string[] {
+  const node = findNodeByPath(tree, path);
+  return (node?.children ?? []).map((child) => child.title);
+}
+
+function findNodeByPath(
+  tree: NormalizedBookmarkNode[],
+  path: string
+): NormalizedBookmarkNode | null {
+  for (const node of tree) {
+    if (node.path === path) {
+      return node;
+    }
+
+    const child = findNodeByPath(node.children ?? [], path);
+
+    if (child) {
+      return child;
+    }
+  }
+
+  return null;
 }
 
 function syncFile(revision: number): SyncFile {
@@ -325,6 +358,283 @@ async function testPendingBookmarkDeletionPreventsResurrectionWithMismatchedBase
   assert.equal(mergedTitles.includes("/Bookmarks Bar/Delete Me"), false);
 }
 
+async function testPendingFolderDeletionRemovesOnlyMatchingSubtree() {
+  const deletedFolder = folder("Delete Folder", [
+    bookmark("A", "https://a.example", 0),
+    bookmark("B", "https://b.example", 1)
+  ], 0);
+  const remote = normalizeSyncTree(
+    normalizeBookmarkTree(
+      browserTree([
+        folder("Bookmarks Bar", [
+          folder("Project A", [deletedFolder], 0),
+          folder("Project B", [
+            folder("Delete Folder", [bookmark("Keep", "https://keep.example", 0)], 0)
+          ], 1)
+        ], 0)
+      ])
+    )
+  );
+  const deletions: PendingBookmarkDeletion[] = [
+    {
+      id: "delete-folder",
+      createdAt: "2026-06-06T00:00:00.000Z",
+      type: "folder",
+      title: "Delete Folder",
+      folderFingerprint: createFolderDeletionFingerprint(deletedFolder)
+    }
+  ];
+  const result = applyPendingBookmarkDeletions(remote, deletions, {
+    includeFolders: true
+  });
+  const resultTitles = titles(result);
+  const local = normalizeSyncTree(
+    normalizeBookmarkTree(
+      browserTree([
+        folder("Bookmarks Bar", [
+          folder("Project A", [], 0),
+          folder("Project B", [
+            folder("Delete Folder", [bookmark("Keep", "https://keep.example", 0)], 0)
+          ], 1)
+        ], 0)
+      ])
+    )
+  );
+  const merged = await mergeBookmarkTrees(remote, local, result);
+
+  assert.equal(resultTitles.includes("/Bookmarks Bar/Project A/Delete Folder"), false);
+  assert.ok(resultTitles.includes("/Bookmarks Bar/Project B/Delete Folder/Keep"));
+  assert.equal(merged.conflicts.length, 0);
+  assert.equal(titles(merged.tree).includes("/Bookmarks Bar/Project A/Delete Folder"), false);
+}
+
+function testLegacyFolderDeletionRemovesEmptyShellAfterChildren() {
+  const remote = normalizeSyncTree(
+    normalizeBookmarkTree(
+      browserTree([
+        folder("Bookmarks Bar", [
+          folder("Delete Folder", [bookmark("A", "https://a.example", 0)], 0)
+        ], 0)
+      ])
+    )
+  );
+  const deletions: PendingBookmarkDeletion[] = [
+    {
+      id: "legacy-folder",
+      createdAt: "2026-06-06T00:00:00.000Z",
+      type: "folder",
+      title: "Delete Folder"
+    },
+    {
+      id: "legacy-child",
+      createdAt: "2026-06-06T00:00:00.000Z",
+      type: "bookmark",
+      title: "A",
+      url: "https://a.example"
+    }
+  ];
+  const result = applyPendingBookmarkDeletions(remote, deletions, {
+    includeFolders: true
+  });
+
+  assert.equal(titles(result).includes("/Bookmarks Bar/Delete Folder"), false);
+}
+
+async function testFolderDeletionWinsAgainstRemoteChildDeletions() {
+  const base = normalizeSyncTree(
+    normalizeBookmarkTree(
+      browserTree([
+        folder("Bookmarks Bar", [
+          folder("Delete Folder", [
+            bookmark("A", "https://a.example", 0),
+            bookmark("B", "https://b.example", 1)
+          ], 0)
+        ], 0)
+      ])
+    )
+  );
+  const local = normalizeSyncTree(
+    normalizeBookmarkTree(
+      browserTree([folder("Bookmarks Bar", [], 0)])
+    )
+  );
+  const remote = normalizeSyncTree(
+    normalizeBookmarkTree(
+      browserTree([
+        folder("Bookmarks Bar", [folder("Delete Folder", [], 0)], 0)
+      ])
+    )
+  );
+  const merged = await mergeBookmarkTrees(base, local, remote);
+
+  assert.equal(merged.conflicts.length, 0);
+  assert.equal(titles(merged.tree).includes("/Bookmarks Bar/Delete Folder"), false);
+}
+
+function testWritableBookmarkIndexesAreSequential() {
+  const writable = prepareWritableBookmarkNodes([
+    {
+      id: "folder",
+      type: "folder",
+      title: "Folder",
+      path: "/Folder",
+      index: Number.MAX_SAFE_INTEGER,
+      children: [
+        {
+          id: "bookmark-b",
+          type: "bookmark",
+          title: "B",
+          url: "https://b.example",
+          path: "/Folder/B",
+          index: Number.MAX_SAFE_INTEGER
+        },
+        {
+          id: "bookmark-a",
+          type: "bookmark",
+          title: "A",
+          url: "https://a.example",
+          path: "/Folder/A",
+          index: 12
+        }
+      ]
+    }
+  ]);
+
+  assert.equal(writable[0].index, 0);
+  assert.deepEqual(writable[0].children?.map((node) => node.index), [0, 1]);
+}
+
+async function testFolderReorderPropagatesAcrossBrowsers() {
+  const base = normalizeSyncTree(
+    normalizeBookmarkTree(
+      browserTree([
+        folder("Bookmarks Bar", [
+          folder("Folder A", [], 0),
+          folder("Folder B", [], 1)
+        ], 0)
+      ])
+    )
+  );
+  const chromeLocal = normalizeSyncTree(
+    normalizeBookmarkTree(
+      browserTree([
+        folder("Bookmarks Bar", [
+          folder("Folder B", [], 0),
+          folder("Folder A", [], 1)
+        ], 0)
+      ])
+    )
+  );
+  const uploaded = await mergeBookmarkTrees(base, chromeLocal, base);
+  const edgeMerged = await mergeBookmarkTrees(base, base, uploaded.tree);
+
+  assert.deepEqual(
+    childTitlesAtPath(uploaded.tree, "/Bookmarks Bar"),
+    ["Folder B", "Folder A"]
+  );
+  assert.deepEqual(
+    childTitlesAtPath(edgeMerged.tree, "/Bookmarks Bar"),
+    ["Folder B", "Folder A"]
+  );
+}
+
+async function testBookmarkReorderPropagatesAcrossBrowsers() {
+  const base = normalizeSyncTree(
+    normalizeBookmarkTree(
+      browserTree([
+        folder("Bookmarks Bar", [
+          bookmark("A", "https://a.example", 0),
+          bookmark("B", "https://b.example", 1)
+        ], 0)
+      ])
+    )
+  );
+  const chromeLocal = normalizeSyncTree(
+    normalizeBookmarkTree(
+      browserTree([
+        folder("Bookmarks Bar", [
+          bookmark("B", "https://b.example", 0),
+          bookmark("A", "https://a.example", 1)
+        ], 0)
+      ])
+    )
+  );
+  const uploaded = await mergeBookmarkTrees(base, chromeLocal, base);
+  const edgeMerged = await mergeBookmarkTrees(base, base, uploaded.tree);
+
+  assert.deepEqual(
+    childTitlesAtPath(uploaded.tree, "/Bookmarks Bar"),
+    ["B", "A"]
+  );
+  assert.deepEqual(
+    childTitlesAtPath(edgeMerged.tree, "/Bookmarks Bar"),
+    ["B", "A"]
+  );
+}
+
+async function testBookmarkMoveAcrossFoldersPropagates() {
+  const base = normalizeSyncTree(
+    normalizeBookmarkTree(
+      browserTree([
+        folder("Bookmarks Bar", [
+          folder("Source", [bookmark("Move Me", "https://move.example", 0)], 0),
+          folder("Target", [], 1)
+        ], 0)
+      ])
+    )
+  );
+  const moved = normalizeSyncTree(
+    normalizeBookmarkTree(
+      browserTree([
+        folder("Bookmarks Bar", [
+          folder("Source", [], 0),
+          folder("Target", [bookmark("Move Me", "https://move.example", 0)], 1)
+        ], 0)
+      ])
+    )
+  );
+  const uploaded = await mergeBookmarkTrees(base, moved, base);
+  const edgeMerged = await mergeBookmarkTrees(base, base, uploaded.tree);
+  const edgeTitles = titles(edgeMerged.tree);
+
+  assert.equal(edgeTitles.includes("/Bookmarks Bar/Source/Move Me"), false);
+  assert.ok(edgeTitles.includes("/Bookmarks Bar/Target/Move Me"));
+}
+
+async function testFolderMoveAcrossParentsPropagates() {
+  const movingFolder = folder(
+    "Move Folder",
+    [bookmark("A", "https://a.example", 0)],
+    0
+  );
+  const base = normalizeSyncTree(
+    normalizeBookmarkTree(
+      browserTree([
+        folder("Bookmarks Bar", [
+          folder("Source", [movingFolder], 0),
+          folder("Target", [], 1)
+        ], 0)
+      ])
+    )
+  );
+  const moved = normalizeSyncTree(
+    normalizeBookmarkTree(
+      browserTree([
+        folder("Bookmarks Bar", [
+          folder("Source", [], 0),
+          folder("Target", [movingFolder], 1)
+        ], 0)
+      ])
+    )
+  );
+  const uploaded = await mergeBookmarkTrees(base, moved, base);
+  const edgeMerged = await mergeBookmarkTrees(base, base, uploaded.tree);
+  const edgeTitles = titles(edgeMerged.tree);
+
+  assert.equal(edgeTitles.includes("/Bookmarks Bar/Source/Move Folder"), false);
+  assert.ok(edgeTitles.includes("/Bookmarks Bar/Target/Move Folder/A"));
+}
+
 function testRootTitleCanonicalization() {
   const tree = normalizeSyncTree(
     normalizeBookmarkTree(
@@ -537,6 +847,14 @@ await testLocalAdditionsSurviveStaleRemote();
 await testLocalDeletionSurvivesStaleRemote();
 await testPendingDeletionPreventsResurrectionWithoutBase();
 await testPendingBookmarkDeletionPreventsResurrectionWithMismatchedBase();
+await testPendingFolderDeletionRemovesOnlyMatchingSubtree();
+testLegacyFolderDeletionRemovesEmptyShellAfterChildren();
+await testFolderDeletionWinsAgainstRemoteChildDeletions();
+testWritableBookmarkIndexesAreSequential();
+await testFolderReorderPropagatesAcrossBrowsers();
+await testBookmarkReorderPropagatesAcrossBrowsers();
+await testBookmarkMoveAcrossFoldersPropagates();
+await testFolderMoveAcrossParentsPropagates();
 testRootTitleCanonicalization();
 testTopLevelS3MarksIsNotMigrated();
 testNativeRootUpdatePlanDoesNotCreateManagedRoot();

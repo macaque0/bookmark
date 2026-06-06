@@ -91,4 +91,5 @@ export interface PendingBookmarkDeletion {
   type: BookmarkNodeType;
   title: string;
   url?: string;
+  folderFingerprint?: string;
 }

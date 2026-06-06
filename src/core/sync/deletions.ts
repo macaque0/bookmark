@@ -1,7 +1,22 @@
 import type { NormalizedBookmarkNode, PendingBookmarkDeletion } from "../../types/bookmark";
 
+export interface FolderFingerprintNode {
+  title: string;
+  url?: string;
+  children?: FolderFingerprintNode[];
+}
+
 export interface PendingDeletionOptions {
   includeFolders?: boolean;
+}
+
+export function createFolderDeletionFingerprint(node: FolderFingerprintNode): string {
+  return JSON.stringify({
+    title: node.title,
+    children: (node.children ?? [])
+      .map((child) => createDeletionNodeFingerprint(child))
+      .sort()
+  });
 }
 
 export function applyPendingBookmarkDeletions(
@@ -17,14 +32,18 @@ export function applyPendingBookmarkDeletions(
     return tree;
   }
 
-  return tree
-    .filter((node) => !matchesAnyDeletion(node, activeDeletions))
+  const recursivelyFiltered = tree
+    .filter((node) => !matchesExactDeletion(node, activeDeletions))
     .map((node) => ({
       ...node,
       children: node.children
         ? applyPendingBookmarkDeletions(node.children, activeDeletions, options)
         : undefined
     }));
+
+  return recursivelyFiltered.filter(
+    (node) => !matchesLegacyEmptyFolderDeletion(node, activeDeletions)
+  );
 }
 
 export function filterPendingDeletionsMissingFromTree(
@@ -54,8 +73,46 @@ function matchesAnyDeletion(
       return deletion.url === node.url;
     }
 
-    return true;
+    return deletion.folderFingerprint
+      ? deletion.folderFingerprint === createFolderDeletionFingerprint(node)
+      : (node.children ?? []).length === 0;
   });
+}
+
+function matchesExactDeletion(
+  node: NormalizedBookmarkNode,
+  deletions: PendingBookmarkDeletion[]
+): boolean {
+  return deletions.some((deletion) => {
+    if (deletion.type !== node.type || deletion.title !== node.title) {
+      return false;
+    }
+
+    if (deletion.type === "bookmark") {
+      return deletion.url === node.url;
+    }
+
+    return Boolean(
+      deletion.folderFingerprint
+      && deletion.folderFingerprint === createFolderDeletionFingerprint(node)
+    );
+  });
+}
+
+function matchesLegacyEmptyFolderDeletion(
+  node: NormalizedBookmarkNode,
+  deletions: PendingBookmarkDeletion[]
+): boolean {
+  return (
+    node.type === "folder"
+    && (node.children ?? []).length === 0
+    && deletions.some(
+      (deletion) =>
+        deletion.type === "folder"
+        && deletion.title === node.title
+        && !deletion.folderFingerprint
+    )
+  );
 }
 
 function treeMatchesDeletion(
@@ -69,4 +126,15 @@ function treeMatchesDeletion(
 
     return treeMatchesDeletion(node.children ?? [], deletion);
   });
+}
+
+function createDeletionNodeFingerprint(node: FolderFingerprintNode): string {
+  if (node.url) {
+    return JSON.stringify({
+      title: node.title,
+      url: node.url
+    });
+  }
+
+  return createFolderDeletionFingerprint(node);
 }

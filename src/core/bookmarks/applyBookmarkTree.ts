@@ -84,7 +84,25 @@ export function prepareBrowserRootUpdates(
     }
   }
 
+  for (const [rootTitle, children] of updates) {
+    updates.set(rootTitle, prepareWritableBookmarkNodes(children));
+  }
+
   return updates;
+}
+
+export function prepareWritableBookmarkNodes(
+  nodes: NormalizedBookmarkNode[]
+): NormalizedBookmarkNode[] {
+  return nodes
+    .filter((node) => !node.deleted)
+    .map((node, index) => ({
+      ...node,
+      index,
+      children: node.children
+        ? prepareWritableBookmarkNodes(node.children)
+        : undefined
+    }));
 }
 
 function getVisibleBrowserRoots(tree: RawBookmarkNode[]): RawBookmarkNode[] {
