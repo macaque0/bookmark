@@ -84,3 +84,11 @@ export interface SyncLogEntry {
   level: "info" | "error";
   message: string;
 }
+
+export interface PendingBookmarkDeletion {
+  id: string;
+  createdAt: string;
+  type: BookmarkNodeType;
+  title: string;
+  url?: string;
+}

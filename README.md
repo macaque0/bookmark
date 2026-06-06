@@ -134,6 +134,10 @@ s3marks/history/000002-<deviceId>-<timestamp>.json.enc
 
 上传时会先写入唯一的 history 文件，再用对象存储返回的 ETag 条件更新 `metadata.json`。如果两个浏览器同时同步，只有先完成条件更新的一方会成功；另一方会提示远程已更新，需要重新同步后再合并。
 
+浏览器插件需要对象存储的 CORS 规则允许读取 `ETag` 响应头，并允许 `If-Match` / `If-None-Match` 请求头。否则插件无法在浏览器里拿到 `metadata.json` 的 ETag，只能在写入前复查 metadata 后降级更新；同步仍会继续，但并发保护会弱一些。若设置页日志出现“metadata.json 未返回 ETag”，请在对象存储 CORS 的 `ExposeHeaders` 中加入 `ETag`。
+
+`metadata.json` 和 `latest.json` 属于可变对象，插件会使用禁用缓存的请求读取并在上传后校验 revision，避免浏览器、CDN 或对象存储缓存返回旧版本。设置页日志也会记录新增、删除、修改、移动、排序和导入等书签变化及其自动同步调度结果。
+
 ## 加密说明
 
 加密密码为空时，同步内容以明文 JSON 写入对象存储。

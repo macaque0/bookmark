@@ -9,6 +9,16 @@ export interface LatestSyncFileCandidate {
   syncFile: SyncFile;
 }
 
+export interface MetadataWriteState {
+  metadata: SyncMetadata | null;
+  eTag: string | null;
+}
+
+export interface MetadataWriteOptions {
+  ifMatch?: string;
+  ifNoneMatch?: string;
+}
+
 export function getMetadataLatestKey(metadata: SyncMetadata | null): string | null {
   const key = metadata?.latestObjectKey?.trim();
 
@@ -49,6 +59,34 @@ export function chooseLegacyLatestSyncFile(
 
 export function getStaleLatestKey(currentLatestKey: string): string {
   return currentLatestKey === LATEST_ENCRYPTED_KEY ? LATEST_JSON_KEY : LATEST_ENCRYPTED_KEY;
+}
+
+export function getMetadataWriteOptions(
+  state: MetadataWriteState
+): MetadataWriteOptions {
+  if (state.eTag) {
+    return { ifMatch: state.eTag };
+  }
+
+  if (state.metadata) {
+    return {};
+  }
+
+  return { ifNoneMatch: "*" };
+}
+
+export function isSameSyncMetadata(
+  left: SyncMetadata | null,
+  right: SyncMetadata | null
+): boolean {
+  return (
+    left?.schemaVersion === right?.schemaVersion
+    && left?.latestRevision === right?.latestRevision
+    && left?.latestUpdatedAt === right?.latestUpdatedAt
+    && left?.latestDeviceId === right?.latestDeviceId
+    && left?.latestObjectKey === right?.latestObjectKey
+    && left?.latestEncrypted === right?.latestEncrypted
+  );
 }
 
 function isSupportedSyncObjectKey(key: string): boolean {

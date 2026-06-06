@@ -1,4 +1,10 @@
-import type { AppConfig, SyncFile, SyncLogEntry, SyncStatus } from "../../types/bookmark";
+import type {
+  AppConfig,
+  PendingBookmarkDeletion,
+  SyncFile,
+  SyncLogEntry,
+  SyncStatus
+} from "../../types/bookmark";
 import { nowIso } from "../../utils/time";
 import { createUuid } from "../../utils/uuid";
 
@@ -7,9 +13,12 @@ const DEVICE_ID_KEY = "s3marks.deviceId";
 const LAST_SYNC_STATE_KEY = "s3marks.lastSyncState";
 const SYNC_STATUS_KEY = "s3marks.syncStatus";
 const SYNC_LOGS_KEY = "s3marks.syncLogs";
+const PENDING_DELETIONS_KEY = "s3marks.pendingBookmarkDeletions";
 const MAX_LOG_ENTRIES = 100;
+const MAX_PENDING_DELETIONS = 500;
 
 const memoryStore = new Map<string, unknown>();
+let syncLogWriteQueue: Promise<void> = Promise.resolve();
 
 export const DEFAULT_AUTO_SYNC_INTERVAL = 60;
 
@@ -80,23 +89,57 @@ export async function getSyncLogs(): Promise<SyncLogEntry[]> {
   return (await storageGet<SyncLogEntry[]>(SYNC_LOGS_KEY)) ?? [];
 }
 
-export async function appendSyncLog(level: SyncLogEntry["level"], message: string): Promise<void> {
-  const logs = await getSyncLogs();
-  const nextLogs = [
-    {
-      id: createUuid(),
-      createdAt: nowIso(),
-      level,
-      message
-    },
-    ...logs
-  ].slice(0, MAX_LOG_ENTRIES);
+export function appendSyncLog(level: SyncLogEntry["level"], message: string): Promise<void> {
+  const write = syncLogWriteQueue.then(async () => {
+    const logs = await getSyncLogs();
+    const nextLogs = [
+      {
+        id: createUuid(),
+        createdAt: nowIso(),
+        level,
+        message
+      },
+      ...logs
+    ].slice(0, MAX_LOG_ENTRIES);
 
-  await storageSet(SYNC_LOGS_KEY, nextLogs);
+    await storageSet(SYNC_LOGS_KEY, nextLogs);
+  });
+
+  syncLogWriteQueue = write.catch(() => undefined);
+  return write;
 }
 
 export async function clearSyncLogs(): Promise<void> {
   await storageRemove(SYNC_LOGS_KEY);
+}
+
+export async function getPendingBookmarkDeletions(): Promise<PendingBookmarkDeletion[]> {
+  return (await storageGet<PendingBookmarkDeletion[]>(PENDING_DELETIONS_KEY)) ?? [];
+}
+
+export async function appendPendingBookmarkDeletions(
+  deletions: Array<Omit<PendingBookmarkDeletion, "id" | "createdAt">>
+): Promise<void> {
+  if (deletions.length === 0) {
+    return;
+  }
+
+  const existing = await getPendingBookmarkDeletions();
+  const createdAt = nowIso();
+  const nextDeletions = [
+    ...deletions.map((deletion) => ({
+      ...deletion,
+      id: createUuid(),
+      createdAt
+    })),
+    ...existing
+  ].slice(0, MAX_PENDING_DELETIONS);
+
+  await storageSet(PENDING_DELETIONS_KEY, nextDeletions);
+}
+
+export async function clearPendingBookmarkDeletions(): Promise<void> {
+  await storageRemove(PENDING_DELETIONS_KEY);
 }
 
 export function isConfigComplete(config: AppConfig | null): config is AppConfig {

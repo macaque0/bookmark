@@ -1,12 +1,24 @@
 import assert from "node:assert/strict";
-import type { NormalizedBookmarkNode, SyncFile, SyncMetadata } from "../src/types/bookmark";
+import type {
+  NormalizedBookmarkNode,
+  PendingBookmarkDeletion,
+  SyncFile,
+  SyncMetadata
+} from "../src/types/bookmark";
 import { prepareBrowserRootUpdates } from "../src/core/bookmarks/applyBookmarkTree";
 import { normalizeBookmarkTree } from "../src/core/bookmarks/normalizeBookmarks";
 import {
+  getBookmarkEventDecision,
+  getDeferredBookmarkChangeDelayMinutes
+} from "../src/background/eventGate";
+import { applyPendingBookmarkDeletions } from "../src/core/sync/deletions";
+import {
   chooseLegacyLatestSyncFile,
+  getMetadataWriteOptions,
   getMetadataLatestKey,
   getStaleLatestKey,
   isEncryptedLatestKey,
+  isSameSyncMetadata,
   LATEST_ENCRYPTED_KEY,
   LATEST_JSON_KEY,
   shouldUsePlaintextBeforeEncrypted
@@ -198,6 +210,121 @@ async function testLocalAdditionsSurviveStaleRemote() {
   assert.ok(mergedTitles.includes("/Bookmarks Bar/Chrome New 2"));
 }
 
+async function testLocalDeletionSurvivesStaleRemote() {
+  const base = normalizeSyncTree(
+    normalizeBookmarkTree(
+      browserTree([
+        folder("收藏夹栏", [
+          bookmark("A", "https://a.example", 0),
+          bookmark("Delete Me", "https://delete.example", 1)
+        ], 0)
+      ])
+    )
+  );
+  const local = normalizeSyncTree(
+    normalizeBookmarkTree(
+      browserTree([
+        folder("收藏夹栏", [bookmark("A", "https://a.example", 0)], 0)
+      ])
+    )
+  );
+  const remote = normalizeSyncTree(
+    normalizeBookmarkTree(
+      browserTree([
+        folder("Bookmarks Bar", [
+          bookmark("A", "https://a.example", 0),
+          bookmark("Delete Me", "https://delete.example", 1)
+        ], 0)
+      ])
+    )
+  );
+  const merged = await mergeBookmarkTrees(base, local, remote);
+  const mergedTitles = titles(merged.tree);
+
+  assert.equal(merged.conflicts.length, 0);
+  assert.ok(mergedTitles.includes("/Bookmarks Bar/A"));
+  assert.equal(mergedTitles.includes("/Bookmarks Bar/Delete Me"), false);
+}
+
+async function testPendingDeletionPreventsResurrectionWithoutBase() {
+  const local = normalizeSyncTree(
+    normalizeBookmarkTree(
+      browserTree([
+        folder("收藏夹栏", [bookmark("A", "https://a.example", 0)], 0)
+      ])
+    )
+  );
+  const remote = normalizeSyncTree(
+    normalizeBookmarkTree(
+      browserTree([
+        folder("Bookmarks Bar", [
+          bookmark("A", "https://a.example", 0),
+          bookmark("Delete Me", "https://delete.example", 1)
+        ], 0)
+      ])
+    )
+  );
+  const deletions: PendingBookmarkDeletion[] = [
+    {
+      id: "delete-1",
+      createdAt: "2026-06-05T00:00:00.000Z",
+      type: "bookmark",
+      title: "Delete Me",
+      url: "https://delete.example"
+    }
+  ];
+  const remoteAfterDeletion = applyPendingBookmarkDeletions(remote, deletions);
+  const merged = await mergeBookmarkTrees([], local, remoteAfterDeletion);
+  const mergedTitles = titles(merged.tree);
+
+  assert.equal(merged.conflicts.length, 0);
+  assert.ok(mergedTitles.includes("/Bookmarks Bar/A"));
+  assert.equal(mergedTitles.includes("/Bookmarks Bar/Delete Me"), false);
+}
+
+async function testPendingBookmarkDeletionPreventsResurrectionWithMismatchedBase() {
+  const staleBase = normalizeSyncTree(
+    normalizeBookmarkTree(
+      browserTree([
+        folder("Bookmarks Bar", [bookmark("A", "https://a.example", 0)], 0)
+      ])
+    )
+  );
+  const local = normalizeSyncTree(
+    normalizeBookmarkTree(
+      browserTree([
+        folder("Bookmarks Bar", [bookmark("A", "https://a.example", 0)], 0)
+      ])
+    )
+  );
+  const remote = normalizeSyncTree(
+    normalizeBookmarkTree(
+      browserTree([
+        folder("Bookmarks Bar", [
+          bookmark("A", "https://a.example", 0),
+          bookmark("Delete Me", "https://delete.example", 1)
+        ], 0)
+      ])
+    )
+  );
+  const deletions: PendingBookmarkDeletion[] = [
+    {
+      id: "delete-2",
+      createdAt: "2026-06-05T00:00:00.000Z",
+      type: "bookmark",
+      title: "Delete Me",
+      url: "https://delete.example"
+    }
+  ];
+  const remoteAfterDeletion = applyPendingBookmarkDeletions(remote, deletions);
+  const merged = await mergeBookmarkTrees(staleBase, local, remoteAfterDeletion);
+  const mergedTitles = titles(merged.tree);
+
+  assert.equal(merged.conflicts.length, 0);
+  assert.ok(mergedTitles.includes("/Bookmarks Bar/A"));
+  assert.equal(mergedTitles.includes("/Bookmarks Bar/Delete Me"), false);
+}
+
 function testRootTitleCanonicalization() {
   const tree = normalizeSyncTree(
     normalizeBookmarkTree(
@@ -338,10 +465,78 @@ function testLegacyLatestSelectionFallsBackToHighestRevision() {
   assert.equal(selected?.revision, 8);
 }
 
+function testMetadataWriteOptionsHandleMissingETag() {
+  const metadata: SyncMetadata = {
+    schemaVersion: 1,
+    latestRevision: 1,
+    latestUpdatedAt: "2026-06-05T00:00:00.000Z",
+    latestDeviceId: "device"
+  };
+
+  assert.deepEqual(getMetadataWriteOptions({ metadata: null, eTag: null }), {
+    ifNoneMatch: "*"
+  });
+  assert.deepEqual(getMetadataWriteOptions({ metadata, eTag: "\"etag-1\"" }), {
+    ifMatch: "\"etag-1\""
+  });
+  assert.deepEqual(getMetadataWriteOptions({ metadata, eTag: null }), {});
+}
+
+function testMetadataVerificationRequiresExactPointer() {
+  const expected: SyncMetadata = {
+    schemaVersion: 1,
+    latestRevision: 78,
+    latestUpdatedAt: "2026-06-05T08:45:40.000Z",
+    latestDeviceId: "chrome",
+    latestObjectKey: "history/000078-chrome.json",
+    latestEncrypted: false
+  };
+
+  assert.equal(isSameSyncMetadata(expected, { ...expected }), true);
+  assert.equal(isSameSyncMetadata(expected, { ...expected, latestRevision: 77 }), false);
+  assert.equal(
+    isSameSyncMetadata(expected, {
+      ...expected,
+      latestObjectKey: "history/000078-edge.json"
+    }),
+    false
+  );
+  assert.equal(isSameSyncMetadata(expected, null), false);
+}
+
+function testBookmarkEventGateDefersPostApplyEvents() {
+  assert.equal(
+    getBookmarkEventDecision(
+      { applyingSyncedBookmarks: true, suppressBookmarkEventsUntil: 1_000 },
+      500
+    ),
+    "ignore"
+  );
+  assert.equal(
+    getBookmarkEventDecision(
+      { applyingSyncedBookmarks: false, suppressBookmarkEventsUntil: 1_000 },
+      500
+    ),
+    "defer"
+  );
+  assert.equal(
+    getBookmarkEventDecision(
+      { applyingSyncedBookmarks: false, suppressBookmarkEventsUntil: 1_000 },
+      1_000
+    ),
+    "handle"
+  );
+  assert.equal(getDeferredBookmarkChangeDelayMinutes(61_000, 0.25, 1_000), 1);
+  assert.equal(getDeferredBookmarkChangeDelayMinutes(2_000, 0.25, 1_000), 0.25);
+}
+
 testS3MarksFolderIsPreserved();
 await testS3MarksFolderMergesLikeNormalUserFolder();
 await testStaleChineseBaseDoesNotDeleteRemote();
 await testLocalAdditionsSurviveStaleRemote();
+await testLocalDeletionSurvivesStaleRemote();
+await testPendingDeletionPreventsResurrectionWithoutBase();
+await testPendingBookmarkDeletionPreventsResurrectionWithMismatchedBase();
 testRootTitleCanonicalization();
 testTopLevelS3MarksIsNotMigrated();
 testNativeRootUpdatePlanDoesNotCreateManagedRoot();
@@ -350,5 +545,8 @@ testMetadataCanPointToImmutableHistoryObject();
 testLegacyMetadataDoesNotPreferStaleEncryptedLatest();
 testLegacyLatestSelectionUsesMetadataRevision();
 testLegacyLatestSelectionFallsBackToHighestRevision();
+testMetadataWriteOptionsHandleMissingETag();
+testMetadataVerificationRequiresExactPointer();
+testBookmarkEventGateDefersPostApplyEvents();
 
 console.log("sync scenarios passed");

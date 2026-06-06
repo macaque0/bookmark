@@ -11,9 +11,11 @@ import { getBrowserBookmarkTree } from "../bookmarks/browserBookmarks";
 import { countBookmarks, normalizeBookmarkTree, sortTreeByIndex } from "../bookmarks/normalizeBookmarks";
 import {
   appendSyncLog,
+  clearPendingBookmarkDeletions,
   getConfig,
   getDeviceId,
   getLastSyncState,
+  getPendingBookmarkDeletions,
   getSyncStatus,
   isConfigComplete,
   saveLastSyncState,
@@ -25,15 +27,23 @@ import {
   deleteObjectIfExists,
   getObjectText,
   getObjectTextWithETag,
+  MUTABLE_OBJECT_CACHE_CONTROL,
   putObjectText
 } from "../storage/s3Storage";
 import { formatRevisionFileName, nowIso } from "../../utils/time";
 import { nodeSignature } from "./diff";
 import {
+  applyPendingBookmarkDeletions,
+  filterPendingDeletionsMissingFromTree,
+  type PendingDeletionOptions
+} from "./deletions";
+import {
   chooseLegacyLatestSyncFile,
+  getMetadataWriteOptions,
   getMetadataLatestKey,
   getStaleLatestKey,
   isEncryptedLatestKey,
+  isSameSyncMetadata,
   LATEST_ENCRYPTED_KEY,
   LATEST_JSON_KEY,
   METADATA_KEY,
@@ -57,6 +67,8 @@ interface LatestSyncState {
   metadataState: MetadataState;
 }
 
+const METADATA_VERIFY_DELAYS_MS = [0, 150, 300, 600, 1_200];
+
 export async function uploadOnly(): Promise<void> {
   await runSyncOperation("上传本地书签到 S3", async () => {
     const config = await requireAppConfig();
@@ -67,6 +79,7 @@ export async function uploadOnly(): Promise<void> {
 
     await uploadSyncFile(syncFile, config, metadataState);
     await saveLastSyncState(syncFile);
+    await clearPendingBookmarkDeletions();
 
     return {
       message: "上传完成",
@@ -88,6 +101,7 @@ export async function downloadOnly(hooks: SyncApplyHooks = {}): Promise<void> {
 
     await applyBookmarkTreeWithHooks(remote.tree, hooks);
     await saveLastSyncState(remote);
+    await clearPendingBookmarkDeletions();
 
     return {
       message: "下载并导入完成",
@@ -104,12 +118,14 @@ export async function syncNow(hooks: SyncApplyHooks = {}): Promise<void> {
     const remoteState = await downloadLatestSyncState(config);
     const remote = remoteState.syncFile;
     const baseState = await getLastSyncState();
+    const pendingDeletions = await getPendingBookmarkDeletions();
 
     if (!remote) {
       const localTree = await readLocalNormalizedTree();
       const firstRevision = await createSyncFile(localTree, 1);
       await uploadSyncFile(firstRevision, config, remoteState.metadataState);
       await saveLastSyncState(firstRevision);
+      await clearPendingBookmarkDeletions();
 
       return {
         message: "远程为空，已上传本地书签",
@@ -120,12 +136,26 @@ export async function syncNow(hooks: SyncApplyHooks = {}): Promise<void> {
     }
 
     if (!baseState) {
-      const { localTree, mergeResult } = await mergeWithStableLocal([], remote.tree);
-      const nextRevision = await createSyncFile(mergeResult.tree, remote.revision + 1);
+      const { localTree, mergeResult } = await mergeWithStableLocal(
+        [],
+        remote.tree,
+        pendingDeletions,
+        { includeFolders: true }
+      );
+      const shouldUpload = shouldUploadMergedTree(remote.tree, mergeResult.tree);
+      const nextState = shouldUpload
+        ? await createSyncFile(mergeResult.tree, remote.revision + 1)
+        : { ...remote, tree: normalizeSyncTree(mergeResult.tree) };
 
-      await uploadSyncFile(nextRevision, config, remoteState.metadataState);
-      await applyBookmarkTreeWithHooks(mergeResult.tree, hooks);
-      await saveLastSyncState(nextRevision);
+      await appendSyncDecisionLog(baseState, localTree, remote, mergeResult.tree, shouldUpload);
+
+      if (shouldUpload) {
+        await uploadSyncFile(nextState, config, remoteState.metadataState);
+      }
+
+      await applyBookmarkTreeIfChanged(localTree, mergeResult.tree, hooks);
+      await saveLastSyncState(nextState);
+      await clearPendingBookmarkDeletions();
 
       return {
         message:
@@ -139,12 +169,26 @@ export async function syncNow(hooks: SyncApplyHooks = {}): Promise<void> {
     }
 
     const base = normalizeSyncTree(baseState.tree);
-    const { localTree, mergeResult } = await mergeWithStableLocal(base, remote.tree);
-    const nextRevision = await createSyncFile(mergeResult.tree, remote.revision + 1);
+    const { localTree, mergeResult } = await mergeWithStableLocal(
+      base,
+      remote.tree,
+      pendingDeletions,
+      { includeFolders: false }
+    );
+    const shouldUpload = shouldUploadMergedTree(remote.tree, mergeResult.tree);
+    const nextState = shouldUpload
+      ? await createSyncFile(mergeResult.tree, remote.revision + 1)
+      : { ...remote, tree: normalizeSyncTree(mergeResult.tree) };
 
-    await uploadSyncFile(nextRevision, config, remoteState.metadataState);
-    await applyBookmarkTreeWithHooks(mergeResult.tree, hooks);
-    await saveLastSyncState(nextRevision);
+    await appendSyncDecisionLog(baseState, localTree, remote, mergeResult.tree, shouldUpload);
+
+    if (shouldUpload) {
+      await uploadSyncFile(nextState, config, remoteState.metadataState);
+    }
+
+    await applyBookmarkTreeIfChanged(localTree, mergeResult.tree, hooks);
+    await saveLastSyncState(nextState);
+    await clearPendingBookmarkDeletions();
 
     return {
       message:
@@ -160,13 +204,19 @@ export async function syncNow(hooks: SyncApplyHooks = {}): Promise<void> {
 
 async function mergeWithStableLocal(
   base: NormalizedBookmarkNode[],
-  remote: NormalizedBookmarkNode[]
+  remote: NormalizedBookmarkNode[],
+  pendingDeletions: Awaited<ReturnType<typeof getPendingBookmarkDeletions>> = [],
+  pendingDeletionOptions: PendingDeletionOptions = {}
 ): Promise<{
   localTree: NormalizedBookmarkNode[];
   mergeResult: Awaited<ReturnType<typeof mergeBookmarkTrees>>;
 }> {
   let localTree = await readLocalNormalizedTree();
-  let mergeResult = await mergeBookmarkTrees(base, localTree, remote);
+  let mergeResult = await mergeBookmarkTrees(
+    base,
+    localTree,
+    applyDeletionsForLocalTree(remote, pendingDeletions, localTree, pendingDeletionOptions)
+  );
 
   for (let attempt = 0; attempt < 3; attempt += 1) {
     const freshLocalTree = await readLocalNormalizedTree();
@@ -176,7 +226,11 @@ async function mergeWithStableLocal(
     }
 
     localTree = freshLocalTree;
-    mergeResult = await mergeBookmarkTrees(base, localTree, remote);
+    mergeResult = await mergeBookmarkTrees(
+      base,
+      localTree,
+      applyDeletionsForLocalTree(remote, pendingDeletions, localTree, pendingDeletionOptions)
+    );
   }
 
   await appendSyncLog(
@@ -185,6 +239,59 @@ async function mergeWithStableLocal(
   );
 
   return { localTree, mergeResult };
+}
+
+function shouldUploadMergedTree(
+  remoteTree: NormalizedBookmarkNode[],
+  mergedTree: NormalizedBookmarkNode[]
+): boolean {
+  return treeSignature(normalizeSyncTree(remoteTree)) !== treeSignature(normalizeSyncTree(mergedTree));
+}
+
+async function appendSyncDecisionLog(
+  baseState: SyncFile | null,
+  localTree: NormalizedBookmarkNode[],
+  remote: SyncFile,
+  mergedTree: NormalizedBookmarkNode[],
+  shouldUpload: boolean
+): Promise<void> {
+  await appendSyncLog(
+    "info",
+    [
+      `同步决策：基线 r${baseState?.revision ?? "none"}`,
+      `本地 ${countBookmarks(localTree)} 个`,
+      `远端 r${remote.revision}/${countBookmarks(remote.tree)} 个`,
+      `合并后 ${countBookmarks(mergedTree)} 个`,
+      shouldUpload ? "需要上传新版本" : "仅应用远端/无需上传"
+    ].join("，")
+  );
+}
+
+async function applyBookmarkTreeIfChanged(
+  localTree: NormalizedBookmarkNode[],
+  targetTree: NormalizedBookmarkNode[],
+  hooks: SyncApplyHooks
+): Promise<void> {
+  if (treeSignature(localTree) === treeSignature(normalizeSyncTree(targetTree))) {
+    return;
+  }
+
+  await applyBookmarkTreeWithHooks(targetTree, hooks);
+}
+
+function applyDeletionsForLocalTree(
+  remote: NormalizedBookmarkNode[],
+  pendingDeletions: Awaited<ReturnType<typeof getPendingBookmarkDeletions>>,
+  localTree: NormalizedBookmarkNode[],
+  options: PendingDeletionOptions
+): NormalizedBookmarkNode[] {
+  const activeDeletions = filterPendingDeletionsMissingFromTree(
+    pendingDeletions,
+    localTree,
+    options
+  );
+
+  return applyPendingBookmarkDeletions(remote, activeDeletions, options);
 }
 
 async function applyBookmarkTreeWithHooks(
@@ -229,7 +336,9 @@ async function downloadLatestSyncState(config: AppConfig): Promise<LatestSyncSta
   const metadataLatestKey = getMetadataLatestKey(metadata);
 
   if (metadataLatestKey) {
-    const text = await getObjectText(metadataLatestKey);
+    const text = await getObjectText(metadataLatestKey, {
+      bypassCache: isMutableLatestKey(metadataLatestKey)
+    });
 
     if (text) {
       return {
@@ -254,7 +363,7 @@ async function downloadLatestSyncFileLegacy(
   config: AppConfig,
   metadata: SyncMetadata | null
 ): Promise<SyncFile | null> {
-  const plaintext = await getObjectText(LATEST_JSON_KEY);
+  const plaintext = await getObjectText(LATEST_JSON_KEY, { bypassCache: true });
   const plaintextSyncFile = plaintext
     ? sanitizeSyncFile(JSON.parse(plaintext) as SyncFile)
     : null;
@@ -263,7 +372,7 @@ async function downloadLatestSyncFileLegacy(
     return plaintextSyncFile;
   }
 
-  const encryptedText = await getObjectText(LATEST_ENCRYPTED_KEY);
+  const encryptedText = await getObjectText(LATEST_ENCRYPTED_KEY, { bypassCache: true });
 
   if (!encryptedText) {
     return plaintextSyncFile;
@@ -316,13 +425,29 @@ async function uploadSyncFile(
     latestObjectKey: revisionKey,
     latestEncrypted: encrypted
   };
+  const metadataWriteOptions = getMetadataWriteOptions(metadataState);
 
   try {
     await putObjectText(revisionKey, body, { ifNoneMatch: "*" });
+
+    if (metadataState.metadata && !metadataState.eTag) {
+      const latestMetadataState = await downloadMetadataState();
+
+      if (!isSameSyncMetadata(latestMetadataState.metadata, metadataState.metadata)) {
+        throw new ConditionalWriteError();
+      }
+
+      await appendSyncLog(
+        "info",
+        "远程 metadata.json 未返回 ETag，本次已在写入前复查 metadata 后继续同步；建议在对象存储 CORS 中暴露 ETag，以恢复强并发保护。"
+      );
+    }
+
     await putObjectText(METADATA_KEY, JSON.stringify(metadata, null, 2), {
-      ifMatch: metadataState.eTag ?? undefined,
-      ifNoneMatch: metadataState.eTag ? undefined : "*"
+      ...metadataWriteOptions,
+      cacheControl: MUTABLE_OBJECT_CACHE_CONTROL
     });
+    await verifyUploadedMetadata(metadata);
   } catch (error) {
     if (error instanceof ConditionalWriteError) {
       throw new Error("远程书签已被其他设备更新，本次同步已取消。请重新点击同步以合并最新远程版本。");
@@ -336,7 +461,7 @@ async function uploadSyncFile(
 }
 
 async function downloadMetadataState(): Promise<MetadataState> {
-  const result = await getObjectTextWithETag(METADATA_KEY);
+  const result = await getObjectTextWithETag(METADATA_KEY, { bypassCache: true });
 
   if (!result) {
     return {
@@ -408,11 +533,52 @@ async function deleteStaleLatestObject(key: string): Promise<void> {
 
 async function putLatestAlias(key: string, body: string): Promise<void> {
   try {
-    await putObjectText(key, body);
+    await putObjectText(key, body, {
+      cacheControl: MUTABLE_OBJECT_CACHE_CONTROL
+    });
   } catch (error) {
     const message = error instanceof Error ? error.message : "未知错误";
     await appendSyncLog("info", `当前同步已完成，但更新 ${key} 兼容副本失败：${message}`);
   }
+}
+
+async function verifyUploadedMetadata(expected: SyncMetadata): Promise<void> {
+  let actual: SyncMetadata | null = null;
+
+  for (const delayMs of METADATA_VERIFY_DELAYS_MS) {
+    if (delayMs > 0) {
+      await delay(delayMs);
+    }
+
+    const state = await downloadMetadataState();
+    actual = state.metadata;
+
+    if (isSameSyncMetadata(actual, expected)) {
+      return;
+    }
+
+    if ((actual?.latestRevision ?? 0) > expected.latestRevision) {
+      throw new ConditionalWriteError();
+    }
+  }
+
+  throw new Error(
+    [
+      `metadata.json 写入后校验失败：期望 r${expected.latestRevision}`,
+      `远端仍返回 r${actual?.latestRevision ?? "none"}`,
+      "请检查对象存储或 CDN 是否缓存了 metadata.json。"
+    ].join("，")
+  );
+}
+
+function isMutableLatestKey(key: string): boolean {
+  return key === LATEST_JSON_KEY || key === LATEST_ENCRYPTED_KEY;
+}
+
+function delay(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, milliseconds);
+  });
 }
 
 async function requireAppConfig(): Promise<AppConfig> {

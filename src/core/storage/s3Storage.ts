@@ -13,10 +13,17 @@ export interface ObjectTextResult {
   eTag: string | null;
 }
 
+export interface GetObjectTextOptions {
+  bypassCache?: boolean;
+}
+
 export interface PutObjectTextOptions {
   ifMatch?: string;
   ifNoneMatch?: string;
+  cacheControl?: string;
 }
+
+export const MUTABLE_OBJECT_CACHE_CONTROL = "no-store, no-cache, must-revalidate, max-age=0";
 
 export class ConditionalWriteError extends Error {
   constructor(message = "对象条件写入失败。") {
@@ -25,12 +32,18 @@ export class ConditionalWriteError extends Error {
   }
 }
 
-export async function getObjectText(key: string): Promise<string | null> {
-  const result = await getObjectTextWithETag(key);
+export async function getObjectText(
+  key: string,
+  options: GetObjectTextOptions = {}
+): Promise<string | null> {
+  const result = await getObjectTextWithETag(key, options);
   return result?.text ?? null;
 }
 
-export async function getObjectTextWithETag(key: string): Promise<ObjectTextResult | null> {
+export async function getObjectTextWithETag(
+  key: string,
+  options: GetObjectTextOptions = {}
+): Promise<ObjectTextResult | null> {
   const config = await requireConfig();
   const client = createS3Client(config);
 
@@ -38,7 +51,10 @@ export async function getObjectTextWithETag(key: string): Promise<ObjectTextResu
     const result = await client.send(
       new GetObjectCommand({
         Bucket: config.bucket,
-        Key: resolveKey(config.prefix, key)
+        Key: resolveKey(config.prefix, key),
+        ResponseCacheControl: options.bypassCache
+          ? createCacheBustControl()
+          : undefined
       })
     );
 
@@ -71,7 +87,8 @@ export async function putObjectText(
         Body: body,
         ContentType: "application/json; charset=utf-8",
         IfMatch: options.ifMatch,
-        IfNoneMatch: options.ifNoneMatch
+        IfNoneMatch: options.ifNoneMatch,
+        CacheControl: options.cacheControl
       })
     );
   } catch (error) {
@@ -238,4 +255,9 @@ function isConditionalWriteConflict(error: unknown): boolean {
     || candidate.$metadata?.httpStatusCode === 409
     || candidate.$metadata?.httpStatusCode === 412
   );
+}
+
+function createCacheBustControl(): string {
+  const requestId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+  return `${MUTABLE_OBJECT_CACHE_CONTROL}, s3marks=${requestId}`;
 }
